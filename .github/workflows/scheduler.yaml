@@ -41,6 +41,6 @@ jobs:
           git add *.json
           
           # Only commit if there are changes (prevents errors if no new houses found)
-          git commit -m "Update known listings [skip ci]" || exit 0
+          git commit -m "Update state files [skip ci]" || exit 0
           
           git push
