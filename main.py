@@ -9,6 +9,8 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
 
@@ -37,6 +39,28 @@ MINSKSTROY_STATE_FILE = "minskstroy_state.json"
 # ==========================================
 # БАЗОВЫЕ ФУНКЦИИ
 # ==========================================
+
+def get_robust_session():
+    """Создает сессию requests, которая автоматически делает повторные попытки при сбоях."""
+    session = requests.Session()
+    
+    # Настраиваем логику повторов:
+    # total=3 - сделать 3 попытки
+    # backoff_factor=2 - пауза между попытками (сначала 1 сек, потом 2, потом 4)
+    # status_forcelist - при каких ошибках сервера пробовать снова
+    retries = Retry(
+        total=3,
+        backoff_factor=2,
+        # status_forcelist=,
+        allowed_methods=["GET"]
+    )
+    
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    
+    return session
+
 
 def send_telegram_message(text):
     """Отправляет сообщение в Telegram через бота."""
@@ -81,7 +105,9 @@ def check_zviazda_pdfs():
 
     try:
         # Получаем ссылки на странице
-        response = requests.get(ZVIAZDA_URL)
+        session = get_robust_session()
+        # timeout=(10, 30) означает: 10 сек на подключение, 30 сек на скачивание страницы
+        response = session.get(ZVIAZDA_URL, timeout=(10, 30))
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -108,7 +134,8 @@ def check_zviazda_pdfs():
     for pdf_url in new_pdfs:
         print(f"Звязда: Проверка {pdf_url}...")
         try:
-            res = requests.get(pdf_url)
+            session = get_robust_session()
+            res = session.get(pdf_url, timeout=(10, 60))
             res.raise_for_status()
             
             pdf_file = BytesIO(res.content)
