@@ -30,6 +30,8 @@ jobs:
           # Map your Secrets to environment variables
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BELKIOSK_LOGIN: ${{ secrets.BELKIOSK_LOGIN }}
+          BELKIOSK_PASSWORD: ${{ secrets.BELKIOSK_PASSWORD }}
         run: python main.py
 
       - name: Commit and Push changes

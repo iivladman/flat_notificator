@@ -382,6 +382,126 @@ def check_minskstroy():
         
     return notifications
 
+
+def check_minsk_courier():
+    """Источник 5: Проверка Минского курьера через архив Белкиоска."""
+    notifications = []
+    
+    BELKIOSK_LOGIN = os.getenv("BELKIOSK_LOGIN")
+    BELKIOSK_PASSWORD = os.getenv("BELKIOSK_PASSWORD")
+    
+    if not BELKIOSK_LOGIN or not BELKIOSK_PASSWORD:
+        print("Белкиоск: Учетные данные не заданы, пропускаем.")
+        return notifications
+
+    STATE_FILE = "belkiosk_state.json"
+    processed_pdfs = set()
+    
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r', encoding='utf-8') as f:
+            try:
+                processed_pdfs = set(json.load(f))
+            except json.JSONDecodeError:
+                pass
+
+    try:
+        session = get_robust_session()
+        
+        # 1. Загружаем страницу входа, чтобы получить CSRF токен и структуру формы
+        login_url = "https://belkiosk.by/user/login"
+        resp = session.get(login_url, timeout=(10, 30))
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Динамически ищем форму с вводом пароля и собираем payload
+        payload = {}
+        for form in soup.find_all('form'):
+            if form.find('input', type='password'):
+                for input_tag in form.find_all('input'):
+                    name = input_tag.get('name')
+                    if not name: 
+                        continue
+                        
+                    type_attr = input_tag.get('type', '').lower()
+                    if type_attr == 'password':
+                        payload[name] = BELKIOSK_PASSWORD
+                    elif type_attr in ['text', 'email', 'tel'] and 'username' in name.lower():
+                        payload[name] = BELKIOSK_LOGIN
+                    elif type_attr in ['text', 'email', 'tel'] and not any(v == BELKIOSK_LOGIN for v in payload.values()):
+                        payload[name] = BELKIOSK_LOGIN
+                    else:
+                        # Захватываем скрытые поля, такие как YII_CSRF_TOKEN
+                        payload[name] = input_tag.get('value', '')
+                break
+        
+        # 2. Отправляем запрос на авторизацию
+        session.post(login_url, data=payload, timeout=(10, 30))
+        
+        # 3. Переходим в личный кабинет (архив)
+        archive_url = "https://belkiosk.by/archive"
+        archive_resp = session.get(archive_url, timeout=(10, 30))
+        archive_soup = BeautifulSoup(archive_resp.text, 'html.parser')
+        
+        # Проверяем успешность авторизации по наличию ссылки "Выйти"
+        if not archive_soup.find('a', href='/user/logout'):
+            print("Белкиоск: Ошибка авторизации. Проверьте логин и пароль.")
+            return notifications
+            
+        # 4. Ищем выпуски Минского курьера
+        current_links = {}
+        for row in archive_soup.find_all('tr'):
+            th = row.find('th', class_='label')
+            if th and 'Минский курьер' in th.text:
+                a_tag = row.find('a')
+                if a_tag and a_tag.get('href') and '/downloads/' in a_tag.get('href'):
+                    href = "https://belkiosk.by" + a_tag.get('href')
+                    current_links[href] = th.text.strip()
+                    
+        # Фильтруем только новые выпуски
+        new_pdfs = {href: text for href, text in current_links.items() if href not in processed_pdfs}
+        
+        if not new_pdfs:
+            print("Белкиоск (Минский курьер): Нет новых выпусков для проверки.")
+            return notifications
+            
+        # 5. Скачиваем и проверяем новые PDF
+        for pdf_url, title in new_pdfs.items():
+            print(f"Белкиоск: Проверка {title}...")
+            
+            # Скачиваем PDF используя АВТОРИЗОВАННУЮ сессию
+            res = session.get(pdf_url, timeout=(10, 60))
+            res.raise_for_status()
+            
+            pdf_file = BytesIO(res.content)
+            reader = PdfReader(pdf_file)
+            
+            found = False
+            for page_num, page in enumerate(reader.pages, 1):
+                text = page.extract_text()
+                if text and KEYWORD_REGEX.search(text):
+                    msg = (
+                        f"🗞 <b>Найдена проектная декларация!</b>\n\n"
+                        f"<b>Источник:</b> {title} (Минский курьер)\n"
+                        f"<b>Страница:</b> {page_num}\n"
+                        f"<a href='https://belkiosk.by/archive'>Перейти в архив Белкиоска</a>"
+                    )
+                    notifications.append(msg)
+                    found = True
+                    break # Достаточно одного совпадения в файле
+            
+            if not found:
+                print(f"Белкиоск: В выпуске '{title}' ключевых слов не найдено.")
+                
+            processed_pdfs.add(pdf_url)
+            
+        # 6. Сохраняем состояние
+        with open(STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(processed_pdfs), f, indent=4, ensure_ascii=False)
+            
+    except Exception as e:
+        print(f"Ошибка при обработке Белкиоск: {e}")
+        
+    return notifications
+
 # ==========================================
 # ГЛАВНАЯ ФУНКЦИЯ
 # ==========================================
@@ -394,8 +514,9 @@ def main():
     all_notifications.extend(check_zviazda_pdfs())
     all_notifications.extend(check_uks_zapad())
     all_notifications.extend(check_mapid())
-    all_notifications.extend(check_minskstroy())    
-    
+    all_notifications.extend(check_minskstroy())
+    all_notifications.extend(check_minsk_courier())
+
     # 2. Отправка уведомлений в Telegram
     if all_notifications:
         print(f"Найдено новых совпадений: {len(all_notifications)}! Отправляем в Telegram...")
