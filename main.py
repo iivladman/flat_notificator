@@ -36,6 +36,12 @@ MAPID_STATE_FILE = "mapid_state.json"
 MINSKSTROY_URL = "https://minskstroy.by/ru/adsall"
 MINSKSTROY_STATE_FILE = "minskstroy_state.json"
 
+
+# --- Настройки Источника 5 (Арендное жилье Мингорисполкома) ---
+MINSK_GOV_RENTAL_URL = "https://minsk.gov.by/ru/freepage/other/arendnoe_zhiljo/"
+MINSK_GOV_RENTAL_STATE_FILE = "minsk_gov_rental_state.json"
+
+
 # ==========================================
 # БАЗОВЫЕ ФУНКЦИИ
 # ==========================================
@@ -502,6 +508,111 @@ def check_minsk_courier():
         
     return notifications
 
+
+def check_minsk_gov_rental():
+    """Источник 6: Проверка новых предложений арендного жилья (СТРОГО ТОЛЬКО КВАРТИРЫ)."""
+    notifications = []
+    STATE_FILE = MINSK_GOV_RENTAL_STATE_FILE
+    
+    processed_items = set()
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r', encoding='utf-8') as f:
+            try:
+                processed_items = set(json.load(f))
+            except json.JSONDecodeError:
+                pass
+
+    is_first_run = not os.path.exists(STATE_FILE)
+
+    # Стоп-слова (адреса исполкомов и инструкции), чтобы не спутать их с квартирами
+    STOP_WORDS = [
+        'одно окно', 'заявлен', 'учет', 'кодекс', 'прием',
+        'кальварийская', 'жилуновича', 'маяковского', 'нёманская', 'неманская', 'мельникайте'
+    ]
+
+    try:
+        session = get_robust_session()
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        response = session.get(MINSK_GOV_RENTAL_URL, headers=headers, timeout=(10, 30))
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Удаляем лишний мусор со страницы
+        for tag in soup(['nav', 'header', 'footer', 'aside', 'script', 'style']):
+            tag.decompose()
+            
+        current_items = {}
+
+        # Проходимся по всем строкам таблиц и абзацам на странице
+        for row in soup.find_all(['tr', 'p', 'li']):
+            text = row.get_text(" ", strip=True)
+            text_lower = text.lower()
+            
+            # ЖЕСТКИЙ ФИЛЬТР: Ищем корни слов, чтобы ловить любые падежи (дом, доме, дома)
+            has_street = any(x in text_lower for x in ['ул.', 'улиц', 'пр-т', 'просп', 'пер.', 'тракт'])
+            has_house = any(x in text_lower for x in ['д.', 'дом'])
+            has_apt = any(x in text_lower for x in ['кв.', 'квартир'])
+            
+            if has_street and has_house and has_apt and any(c.isdigit() for c in text):
+                
+                # Отсеиваем инструкции, если они случайно прошли фильтр
+                if any(sw in text_lower for sw in STOP_WORDS):
+                    continue
+                    
+                # Очищаем от двойных пробелов и переносов строк
+                clean_text = re.sub(r'\s+', ' ', text).strip()
+                
+                # Квартира должна быть разумной длины (не захватывать полстраницы)
+                if 15 < len(clean_text) < 400:
+                    
+                    # Ищем название района, поднимаясь вверх по странице
+                    district = "Мингорисполком (Арендное жилье)"
+                    for prev in row.find_all_previous(['h2', 'h3', 'h4', 'h5', 'b', 'strong', 'td', 'div']):
+                        prev_text = prev.get_text(strip=True)
+                        if 'администрация' in prev_text.lower() and len(prev_text) < 100:
+                            district = prev_text
+                            break
+                    
+                    unique_id = f"{district}_{clean_text[:100]}"
+                    current_items[unique_id] = {
+                        "district": district,
+                        "text": clean_text,
+                        "url": MINSK_GOV_RENTAL_URL
+                    }
+
+    except Exception as e:
+        print(f"Ошибка при проверке Арендного жилья: {e}")
+        return notifications
+
+    if is_first_run:
+        print("Арендное жилье: Первый запуск. Сохраняем ТОЛЬКО квартиры как базу...")
+        with open(STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(current_items.keys()), f, indent=4, ensure_ascii=False)
+        return notifications
+
+    new_keys = [k for k in current_items.keys() if k not in processed_items]
+
+    if not new_keys:
+        print("Арендное жилье: Нет новых квартир.")
+        return notifications
+
+    for key in new_keys:
+        item = current_items[key]
+        print(f"Арендное жилье: Найдено новое -> {item['district']}: {item['text']}")
+        msg = (
+            f"🔑 <b>Новое арендное жилье!</b>\n\n"
+            f"<b>Орган:</b> {item['district']}\n"
+            f"<b>Квартира:</b> {item['text']}\n"
+            f"<a href='{item['url']}'>Смотреть на сайте</a>"
+        )
+        notifications.append(msg)
+        processed_items.add(key)
+
+    with open(STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(list(processed_items), f, indent=4, ensure_ascii=False)
+
+    return notifications
+
 # ==========================================
 # ГЛАВНАЯ ФУНКЦИЯ
 # ==========================================
@@ -516,6 +627,7 @@ def main():
     all_notifications.extend(check_mapid())
     all_notifications.extend(check_minskstroy())
     all_notifications.extend(check_minsk_courier())
+    all_notifications.extend(check_minsk_gov_rental())
 
     # 2. Отправка уведомлений в Telegram
     if all_notifications:
