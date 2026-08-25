@@ -11,6 +11,7 @@ from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import cloudscraper
 
 load_dotenv()
 
@@ -47,23 +48,41 @@ MINSK_GOV_RENTAL_STATE_FILE = "minsk_gov_rental_state.json"
 # ==========================================
 
 def get_robust_session():
-    """Создает сессию requests, которая автоматически делает повторные попытки при сбоях."""
-    session = requests.Session()
+    """Создает сессию, которая притворяется реальным браузером и обходит защиту от ботов."""
     
-    # Настраиваем логику повторов:
-    # total=3 - сделать 3 попытки
-    # backoff_factor=2 - пауза между попытками (сначала 1 сек, потом 2, потом 4)
-    # status_forcelist - при каких ошибках сервера пробовать снова
+    # Вместо обычного requests.Session() используем cloudscraper
+    session = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
+    
+    # Оставляем нашу логику повторных попыток
     retries = Retry(
         total=3,
         backoff_factor=2,
-        # status_forcelist=,
-        allowed_methods=["GET"]
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET", "POST"]
     )
     
     adapter = HTTPAdapter(max_retries=retries)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
+    
+    # Добавляем "человеческие" заголовки, чтобы сервер думал, что мы обычный пользователь
+    session.headers.update({
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0"
+    })
     
     return session
 
@@ -332,8 +351,8 @@ def check_minskstroy():
     is_first_run = not os.path.exists(MINSKSTROY_STATE_FILE)
 
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = requests.get(MINSKSTROY_URL, headers=headers)
+        session = get_robust_session()
+        response = session.get(MINSKSTROY_URL, timeout=(10, 30))
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -532,8 +551,7 @@ def check_minsk_gov_rental():
 
     try:
         session = get_robust_session()
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = session.get(MINSK_GOV_RENTAL_URL, headers=headers, timeout=(10, 30))
+        response = session.get(MINSK_GOV_RENTAL_URL, timeout=(10, 30))
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
 
